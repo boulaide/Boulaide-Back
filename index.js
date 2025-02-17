@@ -42,11 +42,9 @@ sql.connect(dbConfig)
 
 // Helper function that waits for the pool to be ready
 async function getPool() {
-  if (globalPool) {
-    return globalPool;
+  if (!globalPool) {
+    globalPool = await sql.connect(dbConfig);
   }
-  // If globalPool is not set yet, wait for it to be assigned
-  await sql.connect(dbConfig);
   return globalPool;
 }
 
@@ -142,5 +140,5 @@ app.get("/", async (req, res) => {
 
 const port = process.env.PORT || 3001;
 app.listen(port, () => {
-  console.log(`\n\nServer is running on http://localhost:${port}`);
+  console.log(`\n\nServer is running on port ${port}`);
 });
