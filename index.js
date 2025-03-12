@@ -139,7 +139,13 @@ async function addUserStar(user_id, quest_id) {
       .request()
       .input("userIdParam", sql.Int, user_id)
       .input("questIdParam", sql.Int, quest_id).query(`
-        INSERT INTO dbo.user_stars (user_id, quest_id) VALUES (@userIdParam, @questIdParam)
+        IF NOT EXISTS (
+          SELECT * FROM dbo.user_stars
+          WHERE quest_id = @questIdParam
+        )
+        BEGIN
+          INSERT INTO dbo.user_stars (user_id, quest_id) VALUES (@userIdParam, @questIdParam)
+        END        
       `);
 
     return result.rowsAffected[0] > 0;
