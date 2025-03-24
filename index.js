@@ -49,6 +49,25 @@ async function getPool() {
   return globalPool;
 }
 
+async function createUser(username, email, password) {
+  try {
+    const pool = await getPool();
+    const result = await pool
+      .request()
+      .input("usernameParam", sql.VarChar(100), username)
+      .input("emailParam", sql.VarChar(100), email)
+      .input("passwordParam", sql.VarChar(256), password).query(`
+        INSERT INTO dbo.users (username, email, password)
+        OUTPUT INSERTED.user_id
+        VALUES (@usernameParam, @emailParam, @passwordParam)
+      `);
+    return result.recordset[0];
+  } catch (err) {
+    console.error("Erro ao criar usuário:", err);
+    throw err;
+  }
+}
+
 async function getUserByCredentials(email, password) {
   try {
     const pool = await getPool();
@@ -221,6 +240,45 @@ app.post("/add-customization", async (req, res) => {
   } catch (err) {
     console.log("Erro no endpoint de adicionar customização:", err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/register", async (req, res) => {
+  try {
+    const { username, email, password } = req.body;
+
+    if (!username || !email || !password) {
+      return res.status(400).json({ error: "Todos os campos são obrigatórios" });
+    }
+
+    const newUser = await createUser(username, email, password);
+
+    const defaultCustomizations = [5, 6, 7];
+    for (const customizationId of defaultCustomizations) {
+      await addUserCustomization(newUser.user_id, customizationId);
+    }
+
+    const customizations = await getCustomization(newUser.user_id);
+    const equippedItems = customizations.filter((item) => item.equipped);
+
+    res.status(201).json({
+      user_id: newUser.user_id,
+      username: username,
+      email: email,
+      inventories: {
+        inventory: customizations,
+        equipped: equippedItems,
+      },
+    });
+
+  } catch (err) {
+    console.error("Erro no registro:", err);
+    
+    if (err.number === 2627 || err.code === 'EREQUEST' && err.message.includes('Violation of UNIQUE KEY constraint')) {
+      return res.status(400).json({ error: "Email já está em uso" });
+    }
+    
+    res.status(500).json({ error: "Erro ao criar usuário" });
   }
 });
 
