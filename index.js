@@ -221,6 +221,41 @@ async function updateQuestStatus(user_id, quest_id, newStatus) {
   }
 }
 
+async function assignQuestsToUser(user_id) {
+  try {
+    const pool = await getPool();
+
+    // Buscar todas as quests disponíveis
+    const quests = await pool.request().query("SELECT quest_id FROM dbo.quests");
+
+    console.log("quests:", quests);
+
+    if (quests.recordset.length === 0) return;
+
+    // Criar as quests para o usuário
+    const queryValues = quests.recordset
+      .map((_, index) => `(@userIdParam, @questIdParam${index}, 0)`)
+      .join(", ");
+
+    const request = pool.request();
+    request.input("userIdParam", sql.Int, user_id);
+    
+    quests.recordset.forEach((quest, index) => {
+      request.input(`questIdParam${index}`, sql.Int, quest.quest_id);
+    });
+
+    const query = `
+      INSERT INTO dbo.user_quests (user_id, quest_id, status)
+      VALUES ${queryValues}
+    `;
+
+    await request.query(query);
+  } catch (err) {
+    console.error("Erro ao associar quests ao usuário:", err);
+    throw err;
+  }
+}
+
 app.post("/add-customization", async (req, res) => {
   try {
     const { user_id, customization_id } = req.body;
@@ -248,7 +283,9 @@ app.post("/register", async (req, res) => {
     const { username, email, password } = req.body;
 
     if (!username || !email || !password) {
-      return res.status(400).json({ error: "Todos os campos são obrigatórios" });
+      return res
+        .status(400)
+        .json({ error: "Todos os campos são obrigatórios" });
     }
 
     const newUser = await createUser(username, email, password);
@@ -257,6 +294,8 @@ app.post("/register", async (req, res) => {
     for (const customizationId of defaultCustomizations) {
       await addUserCustomization(newUser.user_id, customizationId);
     }
+
+    await assignQuestsToUser(newUser.user_id);
 
     const customizations = await getCustomization(newUser.user_id);
     const equippedItems = customizations.filter((item) => item.equipped);
@@ -270,14 +309,17 @@ app.post("/register", async (req, res) => {
         equipped: equippedItems,
       },
     });
-
   } catch (err) {
     console.error("Erro no registro:", err);
-    
-    if (err.number === 2627 || err.code === 'EREQUEST' && err.message.includes('Violation of UNIQUE KEY constraint')) {
+
+    if (
+      err.number === 2627 ||
+      (err.code === "EREQUEST" &&
+        err.message.includes("Violation of UNIQUE KEY constraint"))
+    ) {
       return res.status(400).json({ error: "Email já está em uso" });
     }
-    
+
     res.status(500).json({ error: "Erro ao criar usuário" });
   }
 });
