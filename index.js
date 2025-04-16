@@ -179,7 +179,7 @@ async function getUserQuests(user_id) {
     const pool = await getPool();
     const result = await pool.request().input("userIdParam", sql.Int, user_id)
       .query(`
-        SELECT uq.user_id, uq.quest_id, uq.status, q.title, q.description
+        SELECT uq.user_id, uq.quest_id, uq.status, q.title, q.description, q.log_text
         FROM dbo.user_quests uq
         INNER JOIN dbo.quests q ON uq.quest_id = q.quest_id
         WHERE uq.user_id = @userIdParam
@@ -191,6 +191,7 @@ async function getUserQuests(user_id) {
         quest_id: quest.quest_id,
         title: quest.title,
         description: quest.description,
+        log_text: quest.log_text,
       },
       status: quest.status,
     }));
@@ -226,7 +227,9 @@ async function assignQuestsToUser(user_id) {
     const pool = await getPool();
 
     // Buscar todas as quests disponíveis
-    const quests = await pool.request().query("SELECT quest_id FROM dbo.quests");
+    const quests = await pool
+      .request()
+      .query("SELECT quest_id FROM dbo.quests");
 
     console.log("quests:", quests);
 
@@ -239,7 +242,7 @@ async function assignQuestsToUser(user_id) {
 
     const request = pool.request();
     request.input("userIdParam", sql.Int, user_id);
-    
+
     quests.recordset.forEach((quest, index) => {
       request.input(`questIdParam${index}`, sql.Int, quest.quest_id);
     });
@@ -252,6 +255,27 @@ async function assignQuestsToUser(user_id) {
     await request.query(query);
   } catch (err) {
     console.error("Erro ao associar quests ao usuário:", err);
+    throw err;
+  }
+}
+
+// New function to update description and log_text in dbo.quests
+async function updateQuestDetails(quest_id, newDescription, newLogText) {
+  try {
+    const pool = await getPool();
+    const result = await pool
+      .request()
+      .input("questIdParam", sql.Int, quest_id)
+      .input("descriptionParam", sql.VarChar(sql.MAX), newDescription)
+      .input("logTextParam", sql.VarChar(sql.MAX), newLogText).query(`
+        UPDATE dbo.quests
+        SET description = @descriptionParam,
+          log_text = @logTextParam
+        WHERE quest_id = @questIdParam
+      `);
+    return result.rowsAffected[0] > 0;
+  } catch (err) {
+    console.error("Erro ao atualizar detalhes da quest:", err);
     throw err;
   }
 }
@@ -451,6 +475,39 @@ app.put("/user-quests-status", async (req, res) => {
       return res.status(500).json({ error: "Erro ao mudar o status da quest" });
   } catch (err) {
     console.log("Erro no endpoint de mudar o status da quest:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// New route to update description and log_text in dbo.quests
+app.put("/quests/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { description, log_text } = req.body;
+
+    if (!id || description === undefined || log_text === undefined) {
+      return res.status(400).json({
+        error:
+          "Parâmetros inválidos: quest ID, description e log_text são obrigatórios.",
+      });
+    }
+
+    const questId = parseInt(id, 10);
+
+    const success = await updateQuestDetails(questId, description, log_text);
+
+    if (success) {
+      return res.json({
+        success: true,
+        message: `Quest com ID ${questId} atualizada com sucesso.`,
+      });
+    } else {
+      return res.status(404).json({
+        error: `Quest com ID ${questId} não encontrada ou erro na atualização.`,
+      });
+    }
+  } catch (err) {
+    console.error("Erro ao atualizar detalhes da quest:", err);
     res.status(500).json({ error: err.message });
   }
 });
