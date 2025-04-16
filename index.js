@@ -259,23 +259,24 @@ async function assignQuestsToUser(user_id) {
   }
 }
 
-// New function to update description and log_text in dbo.quests
-async function updateQuestDetails(quest_id, newDescription, newLogText) {
+async function updateUserQuestDetails(user_id, quest_id, newDescription, newLogText) {
   try {
     const pool = await getPool();
     const result = await pool
       .request()
+      .input("userIdParam", sql.Int, user_id)
       .input("questIdParam", sql.Int, quest_id)
       .input("descriptionParam", sql.VarChar(sql.MAX), newDescription)
       .input("logTextParam", sql.VarChar(sql.MAX), newLogText).query(`
-        UPDATE dbo.quests
-        SET description = @descriptionParam,
-          log_text = @logTextParam
-        WHERE quest_id = @questIdParam
+        UPDATE dbo.user_quests
+        SET user_description = @descriptionParam,
+            user_log_text = @logTextParam
+        WHERE user_id = @userIdParam AND quest_id = @questIdParam
       `);
+
     return result.rowsAffected[0] > 0;
   } catch (err) {
-    console.error("Erro ao atualizar detalhes da quest:", err);
+    console.error("Erro ao atualizar detalhes da quest do usuário:", err);
     throw err;
   }
 }
@@ -439,21 +440,33 @@ app.post("/add-user-star", async (req, res) => {
   }
 });
 
-app.get("/user-quests/:id", async (req, res) => {
+app.put("/user-quests/:user_id/:quest_id", async (req, res) => {
   try {
-    const { id } = req.params;
+    const { user_id, quest_id } = req.params;
+    const { description, log_text } = req.body;
 
-    if (!id)
-      return res
-        .status(400)
-        .json({ success: false, message: "Missing id parameter" });
+    if (!user_id || !quest_id || description === undefined || log_text === undefined) {
+      return res.status(400).json({ error: "Parâmetros inválidos: user ID, quest ID, description e log_text são obrigatórios." });
+    }
 
-    const stars = await getUserQuests(id);
+    const userId = parseInt(user_id, 10);
+    const questId = parseInt(quest_id, 10);
 
-    res.json(stars);
+    const successDetails = await updateUserQuestDetails(userId, questId, description, log_text);
+    let successStatus = true;
+
+
+    if (successDetails || successStatus) {
+      return res.json({
+        success: true,
+        message: `Quest com ID ${questId} do usuário ${userId} atualizada com sucesso.`,
+      });
+    } else {
+      return res.status(404).json({ error: `Quest com ID ${questId} do usuário ${userId} não encontrada ou erro na atualização.` });
+    }
   } catch (err) {
-    console.error("Error querying Azure SQL:", err);
-    res.status(500).send("Error querying database");
+    console.error("Erro ao atualizar detalhes da quest do usuário:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
