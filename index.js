@@ -259,7 +259,12 @@ async function assignQuestsToUser(user_id) {
   }
 }
 
-async function updateUserQuestDetails(user_id, quest_id, newDescription, newLogText) {
+async function updateUserQuestDetails(
+  user_id,
+  quest_id,
+  newDescription,
+  newLogText
+) {
   try {
     const pool = await getPool();
     const result = await pool
@@ -440,21 +445,52 @@ app.post("/add-user-star", async (req, res) => {
   }
 });
 
+app.get("/user-quests/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    if (!id)
+      return res
+        .status(400)
+        .json({ success: false, message: "Missing id parameter" });
+
+    const userQuests = await getUserQuests(parseInt(id, 10));
+    res.json(userQuests);
+  } catch (err) {
+    console.error("Erro no endpoint /user-quests/:id:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.put("/user-quests/:user_id/:quest_id", async (req, res) => {
   try {
     const { user_id, quest_id } = req.params;
     const { description, log_text } = req.body;
 
-    if (!user_id || !quest_id || description === undefined || log_text === undefined) {
-      return res.status(400).json({ error: "Parâmetros inválidos: user ID, quest ID, description e log_text são obrigatórios." });
+    if (
+      !user_id ||
+      !quest_id ||
+      description === undefined ||
+      log_text === undefined
+    ) {
+      return res
+        .status(400)
+        .json({
+          error:
+            "Parâmetros inválidos: user ID, quest ID, description e log_text são obrigatórios.",
+        });
     }
 
     const userId = parseInt(user_id, 10);
     const questId = parseInt(quest_id, 10);
 
-    const successDetails = await updateUserQuestDetails(userId, questId, description, log_text);
+    const successDetails = await updateUserQuestDetails(
+      userId,
+      questId,
+      description,
+      log_text
+    );
     let successStatus = true;
-
 
     if (successDetails || successStatus) {
       return res.json({
@@ -462,7 +498,11 @@ app.put("/user-quests/:user_id/:quest_id", async (req, res) => {
         message: `Quest com ID ${questId} do usuário ${userId} atualizada com sucesso.`,
       });
     } else {
-      return res.status(404).json({ error: `Quest com ID ${questId} do usuário ${userId} não encontrada ou erro na atualização.` });
+      return res
+        .status(404)
+        .json({
+          error: `Quest com ID ${questId} do usuário ${userId} não encontrada ou erro na atualização.`,
+        });
     }
   } catch (err) {
     console.error("Erro ao atualizar detalhes da quest do usuário:", err);
@@ -507,7 +547,11 @@ app.put("/quests/:id", async (req, res) => {
 
     const questId = parseInt(id, 10);
 
-    const success = await updateQuestDetails(questId, description, log_text);
+    const success = await updateUserQuestDetails(
+      questId,
+      description,
+      log_text
+    );
 
     if (success) {
       return res.json({
