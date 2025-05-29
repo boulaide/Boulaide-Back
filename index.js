@@ -130,9 +130,10 @@ async function getUserStars(user_id) {
     const pool = await getPool();
     const result = await pool.request().input("userIdParam", sql.Int, user_id)
       .query(`
-        SELECT us.id AS star_id, us.user_id, q.quest_id, q.title, q.description
+        SELECT us.id AS star_id, us.user_id, q.quest_id, q.title, q.description, m.map
         FROM dbo.user_stars us
         INNER JOIN dbo.quests q ON us.quest_id = q.quest_id
+        INNER JOIN dbo.maps m ON q.map_id = m.id
         WHERE us.user_id = @userIdParam
       `);
 
@@ -180,9 +181,11 @@ async function getUserQuests(user_id) {
     const pool = await getPool();
     const result = await pool.request().input("userIdParam", sql.Int, user_id)
       .query(`
-        SELECT uq.user_id, uq.quest_id, uq.status, q.title, q.description, q.log_text
+        SELECT uq.user_id, uq.quest_id, uq.status, uq.user_description, uq.user_log_text,
+               q.title, m.map
         FROM dbo.user_quests uq
         INNER JOIN dbo.quests q ON uq.quest_id = q.quest_id
+        INNER JOIN dbo.maps m ON q.map_id = m.id
         WHERE uq.user_id = @userIdParam
       `);
 
@@ -191,8 +194,9 @@ async function getUserQuests(user_id) {
       quest: {
         quest_id: quest.quest_id,
         title: quest.title,
-        description: quest.description,
-        log_text: quest.log_text,
+        user_description: quest.user_description,
+        user_log_text: quest.user_log_text,
+        map: quest.map,
       },
       status: quest.status,
     }));
@@ -227,18 +231,18 @@ async function assignQuestsToUser(user_id) {
   try {
     const pool = await getPool();
 
-    // Buscar todas as quests disponíveis
+    // Buscar todas as quests com description e log_text
     const quests = await pool
       .request()
-      .query("SELECT quest_id FROM dbo.quests");
-
-    console.log("quests:", quests);
+      .query("SELECT quest_id, description, log_text FROM dbo.quests");
 
     if (quests.recordset.length === 0) return;
 
-    // Criar as quests para o usuário
     const queryValues = quests.recordset
-      .map((_, index) => `(@userIdParam, @questIdParam${index}, 0)`)
+      .map(
+        (_, index) =>
+          `(@userIdParam, @questIdParam${index}, 0, @descParam${index}, @logTextParam${index})`
+      )
       .join(", ");
 
     const request = pool.request();
@@ -246,10 +250,12 @@ async function assignQuestsToUser(user_id) {
 
     quests.recordset.forEach((quest, index) => {
       request.input(`questIdParam${index}`, sql.Int, quest.quest_id);
+      request.input(`descParam${index}`, sql.VarChar(sql.MAX), quest.description);
+      request.input(`logTextParam${index}`, sql.VarChar(sql.MAX), quest.log_text);
     });
 
     const query = `
-      INSERT INTO dbo.user_quests (user_id, quest_id, status)
+      INSERT INTO dbo.user_quests (user_id, quest_id, status, user_description, user_log_text)
       VALUES ${queryValues}
     `;
 
@@ -474,12 +480,10 @@ app.put("/user-quests/:user_id/:quest_id", async (req, res) => {
       description === undefined ||
       log_text === undefined
     ) {
-      return res
-        .status(400)
-        .json({
-          error:
-            "Parâmetros inválidos: user ID, quest ID, description e log_text são obrigatórios.",
-        });
+      return res.status(400).json({
+        error:
+          "Parâmetros inválidos: user ID, quest ID, description e log_text são obrigatórios.",
+      });
     }
 
     const userId = parseInt(user_id, 10);
@@ -499,11 +503,9 @@ app.put("/user-quests/:user_id/:quest_id", async (req, res) => {
         message: `Quest com ID ${questId} do usuário ${userId} atualizada com sucesso.`,
       });
     } else {
-      return res
-        .status(404)
-        .json({
-          error: `Quest com ID ${questId} do usuário ${userId} não encontrada ou erro na atualização.`,
-        });
+      return res.status(404).json({
+        error: `Quest com ID ${questId} do usuário ${userId} não encontrada ou erro na atualização.`,
+      });
     }
   } catch (err) {
     console.error("Erro ao atualizar detalhes da quest do usuário:", err);
