@@ -143,6 +143,7 @@ async function getUserStars(user_id) {
         id: star.quest_id,
         title: star.title,
         description: star.description,
+        map: star.map,
       },
     }));
   } catch (err) {
