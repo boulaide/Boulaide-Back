@@ -161,14 +161,13 @@ async function addUserStar(user_id, quest_id) {
       .input("userIdParam", sql.Int, user_id)
       .input("questIdParam", sql.Int, quest_id).query(`
         IF NOT EXISTS (
-          SELECT * FROM dbo.user_stars
-          WHERE quest_id = @questIdParam
+          SELECT 1 FROM dbo.user_stars
+          WHERE user_id = @userIdParam AND quest_id = @questIdParam
         )
         BEGIN
           INSERT INTO dbo.user_stars (user_id, quest_id) VALUES (@userIdParam, @questIdParam)
-        END        
+        END       
       `);
-
     return result.rowsAffected[0] > 0;
   } catch (err) {
     console.error("Erro ao adicionar estrela:", err);
@@ -250,8 +249,16 @@ async function assignQuestsToUser(user_id) {
 
     quests.recordset.forEach((quest, index) => {
       request.input(`questIdParam${index}`, sql.Int, quest.quest_id);
-      request.input(`descParam${index}`, sql.VarChar(sql.MAX), quest.description);
-      request.input(`logTextParam${index}`, sql.VarChar(sql.MAX), quest.log_text);
+      request.input(
+        `descParam${index}`,
+        sql.VarChar(sql.MAX),
+        quest.description
+      );
+      request.input(
+        `logTextParam${index}`,
+        sql.VarChar(sql.MAX),
+        quest.log_text
+      );
     });
 
     const query = `
@@ -435,20 +442,49 @@ app.post("/add-user-star", async (req, res) => {
   try {
     const { user_id, quest_id } = req.body;
 
-    if (!user_id || !quest_id)
-      return res.status(400).json({ error: "Parâmetros inválidos" });
+    if (user_id === undefined || quest_id === undefined)
+      // Check for undefined as well
+      return res
+        .status(400)
+        .json({
+          error: "Parâmetros inválidos: user_id e quest_id são obrigatórios.",
+        });
 
-    const success = await addUserStar(user_id, quest_id);
+    const userIdNum = parseInt(user_id, 10);
+    const questIdNum = parseInt(quest_id, 10);
+
+    if (isNaN(userIdNum) || isNaN(questIdNum)) {
+      return res
+        .status(400)
+        .json({ error: "Parâmetros user_id e quest_id devem ser números." });
+    }
+
+    const success = await addUserStar(userIdNum, questIdNum);
 
     if (success)
       return res.json({
         success: true,
         message: "Estrela adicionada com sucesso",
       });
-    else return res.status(500).json({ error: "Erro ao adicionar estrela" });
+    else {
+      console.log(
+        `Tentativa de adicionar estrela que já existe ou falha na inserção: user_id=${userIdNum}, quest_id=${questIdNum}`
+      );
+      return res
+        .status(304)
+        .json({
+          success: false,
+          message: "Usuário já possui esta estrela ou erro ao adicionar.",
+        });
+    }
   } catch (err) {
     console.log("Erro no endpoint de adicionar estrela:", err);
-    res.status(500).json({ error: err.message });
+    res
+      .status(500)
+      .json({
+        error: "Erro interno do servidor ao adicionar estrela.",
+        details: err.message,
+      });
   }
 });
 
