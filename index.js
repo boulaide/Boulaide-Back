@@ -90,7 +90,7 @@ async function getCustomization(user_id) {
     const pool = await getPool();
     const result = await pool.request().input("userIdParam", sql.Int, user_id)
       .query(`
-        SELECT c.*
+        SELECT c.*, uc.equipped
         FROM dbo.user_customizations uc
         INNER JOIN dbo.customizations c ON uc.customization_id = c.customization_id
         WHERE uc.user_id = @userIdParam
@@ -102,20 +102,26 @@ async function getCustomization(user_id) {
   }
 }
 
-async function addUserCustomization(user_id, customization_id) {
+async function addUserCustomization(
+  user_id,
+  customization_id,
+  isEquipped = false
+) {
   try {
     const pool = await getPool();
     const result = await pool
       .request()
       .input("userIdParam", sql.Int, user_id)
-      .input("customizationIdParam", sql.Int, customization_id).query(`
+      .input("customizationIdParam", sql.Int, customization_id)
+      .input("equippedParam", sql.Bit, isEquipped).query(`
         IF NOT EXISTS (
           SELECT 1 FROM dbo.user_customizations 
           WHERE user_id = @userIdParam AND customization_id = @customizationIdParam
         )
         BEGIN
-          INSERT INTO dbo.user_customizations (user_id, customization_id)
-          VALUES (@userIdParam, @customizationIdParam)
+          -- Inserimos o valor de 'equipped'
+          INSERT INTO dbo.user_customizations (user_id, customization_id, equipped)
+          VALUES (@userIdParam, @customizationIdParam, @equippedParam)
         END
       `);
     return result.rowsAffected[0] > 0;
@@ -322,6 +328,46 @@ app.post("/add-customization", async (req, res) => {
   }
 });
 
+app.put("/inventory/equip", async (req, res) => {
+  try {
+    const { user_id, equipped_ids } = req.body;
+
+    if (!user_id || !Array.isArray(equipped_ids)) {
+      return res.status(400).json({ error: "Parâmetros inválidos. 'user_id' e 'equipped_ids' (array) são necessários." });
+    }
+    
+    const pool = await getPool();
+    const transaction = new sql.Transaction(pool);
+
+    await transaction.begin();
+    try {
+      await transaction.request()
+        .input("userIdParam", sql.Int, user_id)
+        .query("UPDATE dbo.user_customizations SET equipped = 0 WHERE user_id = @userIdParam");
+      
+      if (equipped_ids.length > 0) {
+        const idList = equipped_ids.map(id => parseInt(id)).join(',');
+        
+        await transaction.request()
+          .input("userIdParam", sql.Int, user_id)
+          .query(`UPDATE dbo.user_customizations SET equipped = 1 WHERE user_id = @userIdParam AND customization_id IN (${idList})`);
+      }
+      
+      await transaction.commit();
+      res.json({ success: true, message: "Inventário atualizado com sucesso." });
+
+    } catch (err) {
+      await transaction.rollback();
+      console.error("Erro na transação de atualização do inventário:", err);
+      res.status(500).json({ error: "Erro ao atualizar o inventário no banco de dados." });
+    }
+
+  } catch (err) {
+    console.log("Erro no endpoint de equipar item:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post("/register", async (req, res) => {
   try {
     const { username, email, password } = req.body;
@@ -336,7 +382,7 @@ app.post("/register", async (req, res) => {
 
     const defaultCustomizations = [5, 6, 7];
     for (const customizationId of defaultCustomizations) {
-      await addUserCustomization(newUser.user_id, customizationId);
+      await addUserCustomization(newUser.user_id, customizationId, true);
     }
 
     await assignQuestsToUser(newUser.user_id);
@@ -355,7 +401,6 @@ app.post("/register", async (req, res) => {
     });
   } catch (err) {
     console.error("Erro no registro:", err);
-
     if (
       err.number === 2627 ||
       (err.code === "EREQUEST" &&
@@ -363,7 +408,6 @@ app.post("/register", async (req, res) => {
     ) {
       return res.status(400).json({ error: "Email já está em uso" });
     }
-
     res.status(500).json({ error: "Erro ao criar usuário" });
   }
 });
@@ -444,11 +488,9 @@ app.post("/add-user-star", async (req, res) => {
 
     if (user_id === undefined || quest_id === undefined)
       // Check for undefined as well
-      return res
-        .status(400)
-        .json({
-          error: "Parâmetros inválidos: user_id e quest_id são obrigatórios.",
-        });
+      return res.status(400).json({
+        error: "Parâmetros inválidos: user_id e quest_id são obrigatórios.",
+      });
 
     const userIdNum = parseInt(user_id, 10);
     const questIdNum = parseInt(quest_id, 10);
@@ -470,21 +512,17 @@ app.post("/add-user-star", async (req, res) => {
       console.log(
         `Tentativa de adicionar estrela que já existe ou falha na inserção: user_id=${userIdNum}, quest_id=${questIdNum}`
       );
-      return res
-        .status(304)
-        .json({
-          success: false,
-          message: "Usuário já possui esta estrela ou erro ao adicionar.",
-        });
+      return res.status(304).json({
+        success: false,
+        message: "Usuário já possui esta estrela ou erro ao adicionar.",
+      });
     }
   } catch (err) {
     console.log("Erro no endpoint de adicionar estrela:", err);
-    res
-      .status(500)
-      .json({
-        error: "Erro interno do servidor ao adicionar estrela.",
-        details: err.message,
-      });
+    res.status(500).json({
+      error: "Erro interno do servidor ao adicionar estrela.",
+      details: err.message,
+    });
   }
 });
 
