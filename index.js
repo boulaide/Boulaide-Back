@@ -131,6 +131,23 @@ async function addUserCustomization(
   }
 }
 
+async function addUserCustomizationSet(user_id, customization_ids) {
+  try {
+    if (!Array.isArray(customization_ids)) {
+      throw new Error("customization_ids precisa ser um array.");
+    }
+
+    const results = await Promise.all(
+      customization_ids.map((id) => addUserCustomization(user_id, id, false))
+    );
+
+    return results.some((success) => success);
+  } catch (err) {
+    console.error("Erro ao adicionar conjunto de customizações:", err);
+    throw err;
+  }
+}
+
 async function getUserStars(user_id) {
   try {
     const pool = await getPool();
@@ -328,40 +345,79 @@ app.post("/add-customization", async (req, res) => {
   }
 });
 
+app.post("/add-customization-set", async (req, res) => {
+  try {
+    const { user_id, customization_ids } = req.body;
+
+    if (!user_id || !customization_ids || !Array.isArray(customization_ids) || customization_ids.length === 0) {
+      return res.status(400).json({ error: "Parâmetros inválidos. 'user_id' e 'customization_ids' (array) são necessários." });
+    }
+
+    const success = await addUserCustomizationSet(user_id, customization_ids);
+
+    if (success) {
+      return res.json({
+        success: true,
+        message: "Conjunto de customizações adicionado com sucesso",
+      });
+    } else {
+       return res.status(500).json({ error: "Erro ao adicionar conjunto de customizações" });
+    }
+  } catch (err) {
+    console.log("Erro no endpoint de adicionar conjunto de customizações:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
 app.put("/inventory/equip", async (req, res) => {
   try {
     const { user_id, equipped_ids } = req.body;
 
     if (!user_id || !Array.isArray(equipped_ids)) {
-      return res.status(400).json({ error: "Parâmetros inválidos. 'user_id' e 'equipped_ids' (array) são necessários." });
+      return res
+        .status(400)
+        .json({
+          error:
+            "Parâmetros inválidos. 'user_id' e 'equipped_ids' (array) são necessários.",
+        });
     }
-    
+
     const pool = await getPool();
     const transaction = new sql.Transaction(pool);
 
     await transaction.begin();
     try {
-      await transaction.request()
+      await transaction
+        .request()
         .input("userIdParam", sql.Int, user_id)
-        .query("UPDATE dbo.user_customizations SET equipped = 0 WHERE user_id = @userIdParam");
-      
-      if (equipped_ids.length > 0) {
-        const idList = equipped_ids.map(id => parseInt(id)).join(',');
-        
-        await transaction.request()
-          .input("userIdParam", sql.Int, user_id)
-          .query(`UPDATE dbo.user_customizations SET equipped = 1 WHERE user_id = @userIdParam AND customization_id IN (${idList})`);
-      }
-      
-      await transaction.commit();
-      res.json({ success: true, message: "Inventário atualizado com sucesso." });
+        .query(
+          "UPDATE dbo.user_customizations SET equipped = 0 WHERE user_id = @userIdParam"
+        );
 
+      if (equipped_ids.length > 0) {
+        const idList = equipped_ids.map((id) => parseInt(id)).join(",");
+
+        await transaction
+          .request()
+          .input("userIdParam", sql.Int, user_id)
+          .query(
+            `UPDATE dbo.user_customizations SET equipped = 1 WHERE user_id = @userIdParam AND customization_id IN (${idList})`
+          );
+      }
+
+      await transaction.commit();
+      res.json({
+        success: true,
+        message: "Inventário atualizado com sucesso.",
+      });
     } catch (err) {
       await transaction.rollback();
       console.error("Erro na transação de atualização do inventário:", err);
-      res.status(500).json({ error: "Erro ao atualizar o inventário no banco de dados." });
+      res
+        .status(500)
+        .json({ error: "Erro ao atualizar o inventário no banco de dados." });
     }
-
   } catch (err) {
     console.log("Erro no endpoint de equipar item:", err);
     res.status(500).json({ error: err.message });
