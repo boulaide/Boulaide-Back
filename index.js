@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const sql = require("mssql");
+const bcrypt = require("bcrypt");
 
 const app = express();
 app.use(cors());
@@ -51,16 +52,20 @@ async function getPool() {
 
 async function createUser(username, email, password) {
   try {
+    const saltRounds = 10;
+    const hashedPassword = await bcrypt.hash(password, saltRounds);
+
     const pool = await getPool();
     const result = await pool
       .request()
       .input("usernameParam", sql.VarChar(100), username)
       .input("emailParam", sql.VarChar(100), email)
-      .input("passwordParam", sql.VarChar(256), password).query(`
-        INSERT INTO dbo.users (username, email, password)
-        OUTPUT INSERTED.user_id
-        VALUES (@usernameParam, @emailParam, @passwordParam)
-      `);
+      .input("passwordParam", sql.VarChar(256), hashedPassword) // Salva o hash
+      .query(`
+                INSERT INTO dbo.users (username, email, password)
+                OUTPUT INSERTED.user_id
+                VALUES (@usernameParam, @emailParam, @passwordParam)
+            `);
     return result.recordset[0];
   } catch (err) {
     console.error("Erro ao criar usuário:", err);
@@ -68,19 +73,134 @@ async function createUser(username, email, password) {
   }
 }
 
-async function getUserByCredentials(email, password) {
+async function authenticateUser(email, password) {
   try {
     const pool = await getPool();
     const result = await pool
       .request()
-      .input("emailParam", sql.VarChar(100), email)
-      .input("passwordParam", sql.VarChar(256), password).query(`
-        SELECT * FROM dbo.users 
-        WHERE email = @emailParam AND password = @passwordParam
-      `);
-    return result.recordset[0];
+      .input("emailParam", sql.VarChar(100), email).query(`
+                SELECT * FROM dbo.users 
+                WHERE email = @emailParam
+            `);
+
+    const user = result.recordset[0];
+    if (!user) {
+      return null; // Usuário não encontrado
+    }
+
+    // Compara a senha enviada com o hash salvo no banco
+    const match = await bcrypt.compare(password, user.password);
+    if (match) {
+      delete user.password; // Remove o hash da senha do objeto retornado
+      return user;
+    }
+
+    return null; // Senha incorreta
   } catch (err) {
-    console.error("Erro ao buscar usuário:", err);
+    console.error("Erro ao autenticar usuário:", err);
+    throw err;
+  }
+}
+
+async function updateUser(userId, updates) {
+  const { username, email, currentPassword, newPassword } = updates;
+  const pool = await getPool();
+  let hashedPassword = null;
+
+  // Se o usuário quer mudar a senha, precisamos verificar a senha atual primeiro
+  if (newPassword) {
+    if (!currentPassword) {
+      throw new Error("A senha atual é necessária para definir uma nova.");
+    }
+
+    const userResult = await pool
+      .request()
+      .input("userIdParam", sql.Int, userId)
+      .query("SELECT password FROM dbo.users WHERE user_id = @userIdParam");
+
+    const user = userResult.recordset[0];
+    if (!user) {
+      throw new Error("Usuário não encontrado.");
+    }
+
+    const isMatch = await bcrypt.compare(currentPassword, user.password);
+    if (!isMatch) {
+      throw new Error("A senha atual está incorreta.");
+    }
+
+    // Se a senha atual bate, criamos o hash da nova senha
+    const saltRounds = 10;
+    hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+  }
+
+  // Monta a query de UPDATE dinamicamente
+  const setClauses = [];
+  const request = pool.request();
+  request.input("userIdParam", sql.Int, userId);
+
+  if (username) {
+    setClauses.push("username = @usernameParam");
+    request.input("usernameParam", sql.VarChar(100), username);
+  }
+  if (email) {
+    setClauses.push("email = @emailParam");
+    request.input("emailParam", sql.VarChar(100), email);
+  }
+  if (hashedPassword) {
+    setClauses.push("password = @passwordParam");
+    request.input("passwordParam", sql.VarChar(256), hashedPassword);
+  }
+
+  if (setClauses.length === 0) {
+    return { message: "Nenhum dado para atualizar." };
+  }
+
+  const query = `UPDATE dbo.users SET ${setClauses.join(
+    ", "
+  )} WHERE user_id = @userIdParam`;
+  await request.query(query);
+
+  // Retorna os dados atualizados do usuário (sem a senha)
+  const updatedUser = await pool
+    .request()
+    .input("userIdParam", sql.Int, userId)
+    .query(
+      "SELECT user_id, username, email FROM dbo.users WHERE user_id = @userIdParam"
+    );
+
+  return updatedUser.recordset[0];
+}
+
+async function deleteUser(userId) {
+  const pool = await getPool();
+  const transaction = new sql.Transaction(pool);
+
+  try {
+    await transaction.begin();
+    const request = new sql.Request(transaction);
+    request.input("userIdParam", sql.Int, userId);
+
+    // Deleta dados de todas as tabelas relacionadas (ordem importa)
+    await request.query(
+      "DELETE FROM dbo.user_customizations WHERE user_id = @userIdParam"
+    );
+    await request.query(
+      "DELETE FROM dbo.user_stars WHERE user_id = @userIdParam"
+    );
+    await request.query(
+      "DELETE FROM dbo.user_quests WHERE user_id = @userIdParam"
+    );
+
+    // Finalmente, deleta o usuário
+    const result = await request.query(
+      "DELETE FROM dbo.users WHERE user_id = @userIdParam"
+    );
+
+    await transaction.commit();
+    return result.rowsAffected[0] > 0;
+  } catch (err) {
+    await transaction.rollback();
+    console.error("Erro na transação de exclusão do usuário:", err);
     throw err;
   }
 }
@@ -349,8 +469,16 @@ app.post("/add-customization-set", async (req, res) => {
   try {
     const { user_id, customization_ids } = req.body;
 
-    if (!user_id || !customization_ids || !Array.isArray(customization_ids) || customization_ids.length === 0) {
-      return res.status(400).json({ error: "Parâmetros inválidos. 'user_id' e 'customization_ids' (array) são necessários." });
+    if (
+      !user_id ||
+      !customization_ids ||
+      !Array.isArray(customization_ids) ||
+      customization_ids.length === 0
+    ) {
+      return res.status(400).json({
+        error:
+          "Parâmetros inválidos. 'user_id' e 'customization_ids' (array) são necessários.",
+      });
     }
 
     const success = await addUserCustomizationSet(user_id, customization_ids);
@@ -361,26 +489,28 @@ app.post("/add-customization-set", async (req, res) => {
         message: "Conjunto de customizações adicionado com sucesso",
       });
     } else {
-       return res.status(500).json({ error: "Erro ao adicionar conjunto de customizações" });
+      return res
+        .status(500)
+        .json({ error: "Erro ao adicionar conjunto de customizações" });
     }
   } catch (err) {
-    console.log("Erro no endpoint de adicionar conjunto de customizações:", err);
+    console.log(
+      "Erro no endpoint de adicionar conjunto de customizações:",
+      err
+    );
     res.status(500).json({ error: err.message });
   }
 });
-
 
 app.put("/inventory/equip", async (req, res) => {
   try {
     const { user_id, equipped_ids } = req.body;
 
     if (!user_id || !Array.isArray(equipped_ids)) {
-      return res
-        .status(400)
-        .json({
-          error:
-            "Parâmetros inválidos. 'user_id' e 'equipped_ids' (array) são necessários.",
-        });
+      return res.status(400).json({
+        error:
+          "Parâmetros inválidos. 'user_id' e 'equipped_ids' (array) são necessários.",
+      });
     }
 
     const pool = await getPool();
@@ -427,7 +557,6 @@ app.put("/inventory/equip", async (req, res) => {
 app.post("/register", async (req, res) => {
   try {
     const { username, email, password } = req.body;
-
     if (!username || !email || !password) {
       return res
         .status(400)
@@ -435,14 +564,11 @@ app.post("/register", async (req, res) => {
     }
 
     const newUser = await createUser(username, email, password);
-
     const defaultCustomizations = [5, 6, 8];
     for (const customizationId of defaultCustomizations) {
       await addUserCustomization(newUser.user_id, customizationId, true);
     }
-
     await assignQuestsToUser(newUser.user_id);
-
     const customizations = await getCustomization(newUser.user_id);
     const equippedItems = customizations.filter((item) => item.equipped);
 
@@ -450,10 +576,7 @@ app.post("/register", async (req, res) => {
       user_id: newUser.user_id,
       username: username,
       email: email,
-      inventories: {
-        inventory: customizations,
-        equipped: equippedItems,
-      },
+      inventories: { inventory: customizations, equipped: equippedItems },
     });
   } catch (err) {
     console.error("Erro no registro:", err);
@@ -462,7 +585,7 @@ app.post("/register", async (req, res) => {
       (err.code === "EREQUEST" &&
         err.message.includes("Violation of UNIQUE KEY constraint"))
     ) {
-      return res.status(400).json({ error: "Email já está em uso" });
+      return res.status(409).json({ error: "Email já está em uso" }); // 409 Conflict é mais apropriado
     }
     res.status(500).json({ error: "Erro ao criar usuário" });
   }
@@ -475,7 +598,8 @@ app.post("/login", async (req, res) => {
       return res.status(400).json({ error: "Credenciais faltando" });
     }
 
-    const user = await getUserByCredentials(email, password);
+    // A função authenticateUser agora cuida da verificação com bcrypt
+    const user = await authenticateUser(email, password);
     if (!user) {
       return res.status(401).json({ error: "Credenciais inválidas" });
     }
@@ -487,14 +611,62 @@ app.post("/login", async (req, res) => {
       user_id: user.user_id,
       username: user.username,
       email: user.email,
-      inventories: {
-        inventory: customizations,
-        equipped: equippedItems,
-      },
+      inventories: { inventory: customizations, equipped: equippedItems },
     });
   } catch (err) {
     console.error("Erro no login:", err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.put("/user/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+
+    if (!id) {
+      return res.status(400).json({ error: "ID do usuário é obrigatório." });
+    }
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ error: "Nenhum dado para atualizar." });
+    }
+
+    const updatedUser = await updateUser(Number.parseInt(id, 10), updates);
+    res.json({
+      success: true,
+      message: "Perfil atualizado com sucesso.",
+      user: updatedUser,
+    });
+  } catch (err) {
+    console.error("Erro no endpoint de atualizar usuário:", err);
+    // Retorna erro específico se a senha atual estiver errada
+    if (err.message === "A senha atual está incorreta.") {
+      return res.status(403).json({ error: err.message });
+    }
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Rota para DELETAR um usuário
+app.delete("/user/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!id) {
+      return res.status(400).json({ error: "ID do usuário é obrigatório." });
+    }
+
+    const success = await deleteUser(Number.parseInt(id, 10));
+
+    if (success) {
+      res
+        .status(200)
+        .json({ success: true, message: "Usuário deletado com sucesso." });
+    } else {
+      res.status(404).json({ error: "Usuário não encontrado." });
+    }
+  } catch (err) {
+    console.error("Erro no endpoint de deletar usuário:", err);
+    res.status(500).json({ error: "Erro interno ao deletar usuário." });
   }
 });
 
