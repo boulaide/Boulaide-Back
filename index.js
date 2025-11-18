@@ -564,7 +564,7 @@ app.post("/register", async (req, res) => {
     }
 
     const newUser = await createUser(username, email, password);
-    const defaultCustomizations = [5, 6, 8];
+    const defaultCustomizations = [64, 65, 66];
     for (const customizationId of defaultCustomizations) {
       await addUserCustomization(newUser.user_id, customizationId, true);
     }
