@@ -1,11 +1,19 @@
+require("dotenv").config(); // Fixed: Must be the first line
+
 const express = require("express");
 const cors = require("cors");
 const sql = require("mssql");
 const bcrypt = require("bcrypt");
+const { Resend } = require("resend");
+const crypto = require("node:crypto");
 
 const app = express();
+const resend = new Resend(process.env.RESEND_API_KEY);
+
 app.use(cors());
 app.use(express.json());
+
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3001";
 
 const dbConfig = {
   user: "regio-admin",
@@ -15,34 +23,31 @@ const dbConfig = {
   options: {
     encrypt: true,
     trustServerCertificate: false,
-    connectTimeout: 30000, // Increase timeout to 30 sec
-    requestTimeout: 30000, // Timeout for requests
+    connectTimeout: 30000,
+    requestTimeout: 30000,
   },
   pool: {
-    max: 10, // Maximum number of connections in pool
+    max: 10,
     min: 1,
-    idleTimeoutMillis: 30000, // Time to close idle connections
+    idleTimeoutMillis: 30000,
   },
 };
 
-// Global variable to store the connection pool
 let globalPool;
 
-// Initialize the connection pool once when the server starts
 sql
   .connect(dbConfig)
   .then((pool) => {
     globalPool = pool;
-    console.log("Conectado ao Azure SQL");
+    console.log("Connected to Azure SQL");
     pool.on("error", (err) => {
-      console.error("Erro no pool de conexões:", err);
+      console.error("Connection pool error:", err);
     });
   })
   .catch((err) => {
-    console.error("Erro ao conectar ao banco:", err);
+    console.error("Error connecting to database:", err);
   });
 
-// Helper function that waits for the pool to be ready
 async function getPool() {
   if (!globalPool) {
     globalPool = await sql.connect(dbConfig);
@@ -55,20 +60,35 @@ async function createUser(username, email, password) {
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
 
+    const verificationToken = crypto.randomBytes(32).toString("hex");
+
     const pool = await getPool();
     const result = await pool
       .request()
       .input("usernameParam", sql.VarChar(100), username)
       .input("emailParam", sql.VarChar(100), email)
-      .input("passwordParam", sql.VarChar(256), hashedPassword) // Salva o hash
-      .query(`
-                INSERT INTO dbo.users (username, email, password)
+      .input("passwordParam", sql.VarChar(256), hashedPassword)
+      .input("tokenParam", sql.VarChar(255), verificationToken).query(`
+                INSERT INTO dbo.users (username, email, password, is_verified, verification_token)
                 OUTPUT INSERTED.user_id
-                VALUES (@usernameParam, @emailParam, @passwordParam)
+                VALUES (@usernameParam, @emailParam, @passwordParam, 0, @tokenParam)
             `);
+
+    await resend.emails.send({
+      from: "not-reply@visit-boulaide.com",
+      to: email,
+      subject: "Confirm your account on Boulaide",
+      html: `
+        <p>Hello, ${username}!</p>
+        <p>Thank you for registering. To activate your account, please click the link below:</p>
+        <a href="${FRONTEND_URL}/verify-email?token=${verificationToken}">Confirm Account</a>
+        <p>If you did not create this account, please ignore this email.</p>
+      `,
+    });
+
     return result.recordset[0];
   } catch (err) {
-    console.error("Erro ao criar usuário:", err);
+    console.error("Error creating user:", err);
     throw err;
   }
 }
@@ -84,22 +104,113 @@ async function authenticateUser(email, password) {
             `);
 
     const user = result.recordset[0];
-    if (!user) {
-      return null; // Usuário não encontrado
+    if (!user) return null;
+
+    if (user.is_verified === false) {
+      throw new Error("Please confirm your email before logging in.");
     }
 
-    // Compara a senha enviada com o hash salvo no banco
     const match = await bcrypt.compare(password, user.password);
     if (match) {
-      delete user.password; // Remove o hash da senha do objeto retornado
+      delete user.password;
       return user;
     }
 
-    return null; // Senha incorreta
+    return null;
   } catch (err) {
-    console.error("Erro ao autenticar usuário:", err);
+    console.error("Error authenticating user:", err);
     throw err;
   }
+}
+
+async function verifyUserToken(token) {
+  const pool = await getPool();
+
+  const result = await pool
+    .request()
+    .input("tokenParam", sql.VarChar(255), token)
+    .query(
+      "SELECT user_id FROM dbo.users WHERE verification_token = @tokenParam"
+    );
+
+  const user = result.recordset[0];
+  if (!user) return false;
+
+  await pool
+    .request()
+    .input("userIdParam", sql.Int, user.user_id)
+    .query(
+      "UPDATE dbo.users SET is_verified = 1, verification_token = NULL WHERE user_id = @userIdParam"
+    );
+
+  return true;
+}
+
+async function createPasswordResetToken(email) {
+  const pool = await getPool();
+
+  const userResult = await pool
+    .request()
+    .input("emailParam", sql.VarChar(100), email)
+    .query("SELECT user_id, username FROM dbo.users WHERE email = @emailParam");
+
+  const user = userResult.recordset[0];
+  if (!user) return null;
+
+  const resetToken = crypto.randomBytes(32).toString("hex");
+  const expires = new Date(Date.now() + 3600000); // 1 hour
+
+  await pool
+    .request()
+    .input("userIdParam", sql.Int, user.user_id)
+    .input("tokenParam", sql.VarChar(255), resetToken)
+    .input("expiresParam", sql.DateTime, expires)
+    .query(
+      "UPDATE dbo.users SET reset_token = @tokenParam, reset_token_expires = @expiresParam WHERE user_id = @userIdParam"
+    );
+
+  await resend.emails.send({
+    from: "not-reply@visit-boulaide.com",
+    to: email,
+    subject: "Password Reset - Boulaide",
+    html: `
+        <p>Hello, ${user.username}.</p>
+        <p>You requested a password reset. Click the link below to create a new password:</p>
+        <a href="${FRONTEND_URL}/reset-password?token=${resetToken}">Reset Password</a>
+        <p>This link expires in 1 hour.</p>
+      `,
+  });
+
+  return true;
+}
+
+async function resetUserPassword(token, newPassword) {
+  const pool = await getPool();
+
+  const result = await pool
+    .request()
+    .input("tokenParam", sql.VarChar(255), token).query(`
+            SELECT user_id FROM dbo.users 
+            WHERE reset_token = @tokenParam 
+            AND reset_token_expires > GETDATE()
+        `);
+
+  const user = result.recordset[0];
+  if (!user) throw new Error("Invalid or expired token.");
+
+  const saltRounds = 10;
+  const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+
+  await pool
+    .request()
+    .input("userIdParam", sql.Int, user.user_id)
+    .input("passwordParam", sql.VarChar(256), hashedPassword).query(`
+            UPDATE dbo.users 
+            SET password = @passwordParam, reset_token = NULL, reset_token_expires = NULL 
+            WHERE user_id = @userIdParam
+        `);
+
+  return true;
 }
 
 async function updateUser(userId, updates) {
@@ -107,10 +218,9 @@ async function updateUser(userId, updates) {
   const pool = await getPool();
   let hashedPassword = null;
 
-  // Se o usuário quer mudar a senha, precisamos verificar a senha atual primeiro
   if (newPassword) {
     if (!currentPassword) {
-      throw new Error("A senha atual é necessária para definir uma nova.");
+      throw new Error("Current password is required to set a new one.");
     }
 
     const userResult = await pool
@@ -120,20 +230,18 @@ async function updateUser(userId, updates) {
 
     const user = userResult.recordset[0];
     if (!user) {
-      throw new Error("Usuário não encontrado.");
+      throw new Error("User not found.");
     }
 
     const isMatch = await bcrypt.compare(currentPassword, user.password);
     if (!isMatch) {
-      throw new Error("A senha atual está incorreta.");
+      throw new Error("Current password is incorrect.");
     }
 
-    // Se a senha atual bate, criamos o hash da nova senha
     const saltRounds = 10;
     hashedPassword = await bcrypt.hash(newPassword, saltRounds);
   }
 
-  // Monta a query de UPDATE dinamicamente
   const setClauses = [];
   const request = pool.request();
   request.input("userIdParam", sql.Int, userId);
@@ -152,7 +260,7 @@ async function updateUser(userId, updates) {
   }
 
   if (setClauses.length === 0) {
-    return { message: "Nenhum dado para atualizar." };
+    return { message: "No data to update." };
   }
 
   const query = `UPDATE dbo.users SET ${setClauses.join(
@@ -160,7 +268,6 @@ async function updateUser(userId, updates) {
   )} WHERE user_id = @userIdParam`;
   await request.query(query);
 
-  // Retorna os dados atualizados do usuário (sem a senha)
   const updatedUser = await pool
     .request()
     .input("userIdParam", sql.Int, userId)
@@ -180,7 +287,6 @@ async function deleteUser(userId) {
     const request = new sql.Request(transaction);
     request.input("userIdParam", sql.Int, userId);
 
-    // Deleta dados de todas as tabelas relacionadas (ordem importa)
     await request.query(
       "DELETE FROM dbo.user_customizations WHERE user_id = @userIdParam"
     );
@@ -191,7 +297,6 @@ async function deleteUser(userId) {
       "DELETE FROM dbo.user_quests WHERE user_id = @userIdParam"
     );
 
-    // Finalmente, deleta o usuário
     const result = await request.query(
       "DELETE FROM dbo.users WHERE user_id = @userIdParam"
     );
@@ -200,7 +305,7 @@ async function deleteUser(userId) {
     return result.rowsAffected[0] > 0;
   } catch (err) {
     await transaction.rollback();
-    console.error("Erro na transação de exclusão do usuário:", err);
+    console.error("Error in delete user transaction:", err);
     throw err;
   }
 }
@@ -217,7 +322,7 @@ async function getCustomization(user_id) {
       `);
     return result.recordset;
   } catch (err) {
-    console.error("Erro ao buscar customizações:", err);
+    console.error("Error fetching customizations:", err);
     throw err;
   }
 }
@@ -239,14 +344,13 @@ async function addUserCustomization(
           WHERE user_id = @userIdParam AND customization_id = @customizationIdParam
         )
         BEGIN
-          -- Inserimos o valor de 'equipped'
           INSERT INTO dbo.user_customizations (user_id, customization_id, equipped)
           VALUES (@userIdParam, @customizationIdParam, @equippedParam)
         END
       `);
     return result.rowsAffected[0] > 0;
   } catch (err) {
-    console.error("Erro ao adicionar customização:", err);
+    console.error("Error adding customization:", err);
     throw err;
   }
 }
@@ -254,16 +358,16 @@ async function addUserCustomization(
 async function addUserCustomizationSet(user_id, customization_ids) {
   try {
     if (!Array.isArray(customization_ids)) {
-      throw new Error("customization_ids precisa ser um array.");
+      throw new TypeError("customization_ids must be an array.");
     }
 
     const results = await Promise.all(
       customization_ids.map((id) => addUserCustomization(user_id, id, false))
     );
 
-    return results.some((success) => success);
+    return results.some(Boolean);
   } catch (err) {
-    console.error("Erro ao adicionar conjunto de customizações:", err);
+    console.error("Error adding customization set:", err);
     throw err;
   }
 }
@@ -291,7 +395,7 @@ async function getUserStars(user_id) {
       },
     }));
   } catch (err) {
-    console.error("Erro ao buscar estrelas:", err);
+    console.error("Error fetching stars:", err);
     throw err;
   }
 }
@@ -313,7 +417,7 @@ async function addUserStar(user_id, quest_id) {
       `);
     return result.rowsAffected[0] > 0;
   } catch (err) {
-    console.error("Erro ao adicionar estrela:", err);
+    console.error("Error adding star:", err);
     throw err;
   }
 }
@@ -343,7 +447,7 @@ async function getUserQuests(user_id) {
       status: quest.status,
     }));
   } catch (err) {
-    console.error("Erro ao buscar questões do usuário:", err);
+    console.error("Error fetching user quests:", err);
     throw err;
   }
 }
@@ -361,10 +465,9 @@ async function updateQuestStatus(user_id, quest_id, newStatus) {
         WHERE user_id = @userIdParam AND quest_id = @questIdParam
       `);
 
-    // Retorna true se pelo menos uma linha foi afetada
     return result.rowsAffected[0] > 0;
   } catch (err) {
-    console.error("Erro ao atualizar o status da quest:", err);
+    console.error("Error updating quest status:", err);
     throw err;
   }
 }
@@ -373,7 +476,6 @@ async function assignQuestsToUser(user_id) {
   try {
     const pool = await getPool();
 
-    // Buscar todas as quests com description e log_text
     const quests = await pool
       .request()
       .query("SELECT quest_id, description, log_text FROM dbo.quests");
@@ -411,7 +513,7 @@ async function assignQuestsToUser(user_id) {
 
     await request.query(query);
   } catch (err) {
-    console.error("Erro ao associar quests ao usuário:", err);
+    console.error("Error assigning quests to user:", err);
     throw err;
   }
 }
@@ -438,7 +540,7 @@ async function updateUserQuestDetails(
 
     return result.rowsAffected[0] > 0;
   } catch (err) {
-    console.error("Erro ao atualizar detalhes da quest do usuário:", err);
+    console.error("Error updating user quest details:", err);
     throw err;
   }
 }
@@ -448,19 +550,18 @@ app.post("/add-customization", async (req, res) => {
     const { user_id, customization_id } = req.body;
 
     if (!user_id || !customization_id)
-      return res.status(400).json({ error: "Parâmetros inválidos" });
+      return res.status(400).json({ error: "Invalid parameters" });
 
     const success = await addUserCustomization(user_id, customization_id);
 
     if (success)
       return res.json({
         success: true,
-        message: "Customização adicionada com sucesso",
+        message: "Customization added successfully",
       });
-    else
-      return res.status(500).json({ error: "Erro ao adicionar customização" });
+    else return res.status(500).json({ error: "Error adding customization" });
   } catch (err) {
-    console.log("Erro no endpoint de adicionar customização:", err);
+    console.log("Error in add-customization endpoint:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -477,7 +578,7 @@ app.post("/add-customization-set", async (req, res) => {
     ) {
       return res.status(400).json({
         error:
-          "Parâmetros inválidos. 'user_id' e 'customization_ids' (array) são necessários.",
+          "Invalid parameters. 'user_id' and 'customization_ids' (array) are required.",
       });
     }
 
@@ -486,18 +587,13 @@ app.post("/add-customization-set", async (req, res) => {
     if (success) {
       return res.json({
         success: true,
-        message: "Conjunto de customizações adicionado com sucesso",
+        message: "Customization set added successfully",
       });
     } else {
-      return res
-        .status(500)
-        .json({ error: "Erro ao adicionar conjunto de customizações" });
+      return res.status(500).json({ error: "Error adding customization set" });
     }
   } catch (err) {
-    console.log(
-      "Erro no endpoint de adicionar conjunto de customizações:",
-      err
-    );
+    console.log("Error in add-customization-set endpoint:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -509,7 +605,7 @@ app.put("/inventory/equip", async (req, res) => {
     if (!user_id || !Array.isArray(equipped_ids)) {
       return res.status(400).json({
         error:
-          "Parâmetros inválidos. 'user_id' e 'equipped_ids' (array) são necessários.",
+          "Invalid parameters. 'user_id' and 'equipped_ids' (array) are required.",
       });
     }
 
@@ -526,7 +622,7 @@ app.put("/inventory/equip", async (req, res) => {
         );
 
       if (equipped_ids.length > 0) {
-        const idList = equipped_ids.map((id) => parseInt(id)).join(",");
+        const idList = equipped_ids.map((id) => Number.parseInt(id)).join(",");
 
         await transaction
           .request()
@@ -539,17 +635,15 @@ app.put("/inventory/equip", async (req, res) => {
       await transaction.commit();
       res.json({
         success: true,
-        message: "Inventário atualizado com sucesso.",
+        message: "Inventory updated successfully.",
       });
     } catch (err) {
       await transaction.rollback();
-      console.error("Erro na transação de atualização do inventário:", err);
-      res
-        .status(500)
-        .json({ error: "Erro ao atualizar o inventário no banco de dados." });
+      console.error("Error in inventory update transaction:", err);
+      res.status(500).json({ error: "Error updating inventory in database." });
     }
   } catch (err) {
-    console.log("Erro no endpoint de equipar item:", err);
+    console.log("Error in equip item endpoint:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -558,9 +652,7 @@ app.post("/register", async (req, res) => {
   try {
     const { username, email, password } = req.body;
     if (!username || !email || !password) {
-      return res
-        .status(400)
-        .json({ error: "Todos os campos são obrigatórios" });
+      return res.status(400).json({ error: "All fields are required" });
     }
 
     const newUser = await createUser(username, email, password);
@@ -579,15 +671,15 @@ app.post("/register", async (req, res) => {
       inventories: { inventory: customizations, equipped: equippedItems },
     });
   } catch (err) {
-    console.error("Erro no registro:", err);
+    console.error("Error in register:", err);
     if (
       err.number === 2627 ||
       (err.code === "EREQUEST" &&
         err.message.includes("Violation of UNIQUE KEY constraint"))
     ) {
-      return res.status(409).json({ error: "Email já está em uso" }); // 409 Conflict é mais apropriado
+      return res.status(409).json({ error: "Email already in use" });
     }
-    res.status(500).json({ error: "Erro ao criar usuário" });
+    res.status(500).json({ error: "Error creating user" });
   }
 });
 
@@ -595,13 +687,12 @@ app.post("/login", async (req, res) => {
   try {
     const { email, password } = req.body;
     if (!email || !password) {
-      return res.status(400).json({ error: "Credenciais faltando" });
+      return res.status(400).json({ error: "Missing credentials" });
     }
 
-    // A função authenticateUser agora cuida da verificação com bcrypt
     const user = await authenticateUser(email, password);
     if (!user) {
-      return res.status(401).json({ error: "Credenciais inválidas" });
+      return res.status(401).json({ error: "Invalid credentials" });
     }
 
     const customizations = await getCustomization(user.user_id);
@@ -614,7 +705,7 @@ app.post("/login", async (req, res) => {
       inventories: { inventory: customizations, equipped: equippedItems },
     });
   } catch (err) {
-    console.error("Erro no login:", err);
+    console.error("Error in login:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -625,48 +716,49 @@ app.put("/user/:id", async (req, res) => {
     const updates = req.body;
 
     if (!id) {
-      return res.status(400).json({ error: "ID do usuário é obrigatório." });
+      return res.status(400).json({ error: "User ID is required." });
     }
     if (Object.keys(updates).length === 0) {
-      return res.status(400).json({ error: "Nenhum dado para atualizar." });
+      return res.status(400).json({ error: "No data to update." });
     }
 
-    const updatedUser = await updateUser(Number.parseInt(id, 10), updates);
+    const updatedUser = await updateUser(
+      Number.Number.parseInt(id, 10),
+      updates
+    );
     res.json({
       success: true,
-      message: "Perfil atualizado com sucesso.",
+      message: "Profile updated successfully.",
       user: updatedUser,
     });
   } catch (err) {
-    console.error("Erro no endpoint de atualizar usuário:", err);
-    // Retorna erro específico se a senha atual estiver errada
-    if (err.message === "A senha atual está incorreta.") {
+    console.error("Error in update user endpoint:", err);
+    if (err.message === "Current password is incorrect.") {
       return res.status(403).json({ error: err.message });
     }
     res.status(500).json({ error: err.message });
   }
 });
 
-// Rota para DELETAR um usuário
 app.delete("/user/:id", async (req, res) => {
   try {
     const { id } = req.params;
     if (!id) {
-      return res.status(400).json({ error: "ID do usuário é obrigatório." });
+      return res.status(400).json({ error: "User ID is required." });
     }
 
-    const success = await deleteUser(Number.parseInt(id, 10));
+    const success = await deleteUser(Number.Number.parseInt(id, 10));
 
     if (success) {
       res
         .status(200)
-        .json({ success: true, message: "Usuário deletado com sucesso." });
+        .json({ success: true, message: "User deleted successfully." });
     } else {
-      res.status(404).json({ error: "Usuário não encontrado." });
+      res.status(404).json({ error: "User not found." });
     }
   } catch (err) {
-    console.error("Erro no endpoint de deletar usuário:", err);
-    res.status(500).json({ error: "Erro interno ao deletar usuário." });
+    console.error("Error in delete user endpoint:", err);
+    res.status(500).json({ error: "Internal error deleting user." });
   }
 });
 
@@ -715,18 +807,17 @@ app.post("/add-user-star", async (req, res) => {
     const { user_id, quest_id } = req.body;
 
     if (user_id === undefined || quest_id === undefined)
-      // Check for undefined as well
       return res.status(400).json({
-        error: "Parâmetros inválidos: user_id e quest_id são obrigatórios.",
+        error: "Invalid parameters: user_id and quest_id are required.",
       });
 
-    const userIdNum = parseInt(user_id, 10);
-    const questIdNum = parseInt(quest_id, 10);
+    const userIdNum = Number.parseInt(user_id, 10);
+    const questIdNum = Number.parseInt(quest_id, 10);
 
-    if (isNaN(userIdNum) || isNaN(questIdNum)) {
+    if (Number.isNaN(userIdNum) || Number.isNaN(questIdNum)) {
       return res
         .status(400)
-        .json({ error: "Parâmetros user_id e quest_id devem ser números." });
+        .json({ error: "Parameters user_id and quest_id must be numbers." });
     }
 
     const success = await addUserStar(userIdNum, questIdNum);
@@ -734,21 +825,21 @@ app.post("/add-user-star", async (req, res) => {
     if (success)
       return res.json({
         success: true,
-        message: "Estrela adicionada com sucesso",
+        message: "Star added successfully",
       });
     else {
       console.log(
-        `Tentativa de adicionar estrela que já existe ou falha na inserção: user_id=${userIdNum}, quest_id=${questIdNum}`
+        `Attempt to add existing star or insert failure: user_id=${userIdNum}, quest_id=${questIdNum}`
       );
       return res.status(304).json({
         success: false,
-        message: "Usuário já possui esta estrela ou erro ao adicionar.",
+        message: "User already has this star or error adding it.",
       });
     }
   } catch (err) {
-    console.log("Erro no endpoint de adicionar estrela:", err);
+    console.log("Error in add star endpoint:", err);
     res.status(500).json({
-      error: "Erro interno do servidor ao adicionar estrela.",
+      error: "Internal server error adding star.",
       details: err.message,
     });
   }
@@ -763,10 +854,10 @@ app.get("/user-quests/:id", async (req, res) => {
         .status(400)
         .json({ success: false, message: "Missing id parameter" });
 
-    const userQuests = await getUserQuests(parseInt(id, 10));
+    const userQuests = await getUserQuests(Number.parseInt(id, 10));
     res.json(userQuests);
   } catch (err) {
-    console.error("Erro no endpoint /user-quests/:id:", err);
+    console.error("Error in /user-quests/:id endpoint:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -784,12 +875,12 @@ app.put("/user-quests/:user_id/:quest_id", async (req, res) => {
     ) {
       return res.status(400).json({
         error:
-          "Parâmetros inválidos: user ID, quest ID, description e log_text são obrigatórios.",
+          "Invalid parameters: user ID, quest ID, description, and log_text are required.",
       });
     }
 
-    const userId = parseInt(user_id, 10);
-    const questId = parseInt(quest_id, 10);
+    const userId = Number.parseInt(user_id, 10);
+    const questId = Number.parseInt(quest_id, 10);
 
     const successDetails = await updateUserQuestDetails(
       userId,
@@ -802,15 +893,15 @@ app.put("/user-quests/:user_id/:quest_id", async (req, res) => {
     if (successDetails || successStatus) {
       return res.json({
         success: true,
-        message: `Quest com ID ${questId} do usuário ${userId} atualizada com sucesso.`,
+        message: `Quest with ID ${questId} for user ${userId} updated successfully.`,
       });
     } else {
       return res.status(404).json({
-        error: `Quest com ID ${questId} do usuário ${userId} não encontrada ou erro na atualização.`,
+        error: `Quest with ID ${questId} for user ${userId} not found or update error.`,
       });
     }
   } catch (err) {
-    console.error("Erro ao atualizar detalhes da quest do usuário:", err);
+    console.error("Error updating user quest details:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -820,24 +911,22 @@ app.put("/user-quests-status", async (req, res) => {
     const { user_id, quest_id, newStatus } = req.body;
     console.log(user_id, quest_id, newStatus);
     if (!user_id || !quest_id || newStatus === undefined)
-      return res.status(400).json({ error: "Parâmetros inválidos" });
+      return res.status(400).json({ error: "Invalid parameters" });
 
     const success = await updateQuestStatus(user_id, quest_id, newStatus);
 
     if (success)
       return res.json({
         success: true,
-        message: "Status da quest mudado com sucesso",
+        message: "Quest status changed successfully",
       });
-    else
-      return res.status(500).json({ error: "Erro ao mudar o status da quest" });
+    else return res.status(500).json({ error: "Error changing quest status" });
   } catch (err) {
-    console.log("Erro no endpoint de mudar o status da quest:", err);
+    console.log("Error in change quest status endpoint:", err);
     res.status(500).json({ error: err.message });
   }
 });
 
-// New route to update description and log_text in dbo.quests
 app.put("/quests/:id", async (req, res) => {
   try {
     const { id } = req.params;
@@ -846,11 +935,11 @@ app.put("/quests/:id", async (req, res) => {
     if (!id || description === undefined || log_text === undefined) {
       return res.status(400).json({
         error:
-          "Parâmetros inválidos: quest ID, description e log_text são obrigatórios.",
+          "Invalid parameters: quest ID, description, and log_text are required.",
       });
     }
 
-    const questId = parseInt(id, 10);
+    const questId = Number.parseInt(id, 10);
 
     const success = await updateUserQuestDetails(
       questId,
@@ -861,16 +950,80 @@ app.put("/quests/:id", async (req, res) => {
     if (success) {
       return res.json({
         success: true,
-        message: `Quest com ID ${questId} atualizada com sucesso.`,
+        message: `Quest with ID ${questId} updated successfully.`,
       });
     } else {
       return res.status(404).json({
-        error: `Quest com ID ${questId} não encontrada ou erro na atualização.`,
+        error: `Quest with ID ${questId} not found or update error.`,
       });
     }
   } catch (err) {
-    console.error("Erro ao atualizar detalhes da quest:", err);
+    console.error("Error updating quest details:", err);
     res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/verify-email", async (req, res) => {
+  try {
+    const { token } = req.query;
+
+    if (!token) return res.status(400).send("<h1>Error: Token required</h1>");
+
+    const success = await verifyUserToken(token);
+
+    if (success) {
+      res.send(`
+        <html>
+          <head><title>Account Verified</title></head>
+          <body style="font-family: Arial; text-align: center; padding-top: 50px;">
+            <h1 style="color: green;">Success!</h1>
+            <p>Your account has been successfully verified.</p>
+            <p>You can now close this window and log in to the application.</p>
+          </body>
+        </html>
+      `);
+    } else {
+      res.status(400).send("<h1>Error: Invalid or expired token.</h1>");
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("<h1>Internal error verifying account.</h1>");
+  }
+});
+
+app.post("/forgot-password", async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: "Email is required" });
+
+    await createPasswordResetToken(email);
+
+    res.json({
+      success: true,
+      message: "If the email exists, instructions have been sent.",
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Internal error." });
+  }
+});
+
+app.post("/reset-password", async (req, res) => {
+  try {
+    const { token, newPassword } = req.body;
+
+    if (!token || !newPassword) {
+      return res
+        .status(400)
+        .json({ error: "Token and new password are required." });
+    }
+
+    await resetUserPassword(token, newPassword);
+
+    res.json({ success: true, message: "Password changed successfully." });
+  } catch (err) {
+    console.error(err);
+    res.status(400).json({ error: err.message });
   }
 });
 
