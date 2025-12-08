@@ -158,7 +158,7 @@ async function createPasswordResetToken(email) {
   if (!user) return null;
 
   const resetToken = crypto.randomBytes(32).toString("hex");
-  const expires = new Date(Date.now() + 3600000); // 1 hour
+  const expires = new Date(Date.now() + 3600000); // 1h
 
   await pool
     .request()
