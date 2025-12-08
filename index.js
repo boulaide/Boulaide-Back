@@ -14,7 +14,6 @@ app.use(cors());
 app.use(express.json());
 
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
-
 const dbConfig = {
   user: "regio-admin",
   password: "regi0-adm1n!!",
