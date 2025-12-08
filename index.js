@@ -13,7 +13,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 app.use(cors());
 app.use(express.json());
 
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3001";
+const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
 
 const dbConfig = {
   user: "regio-admin",
