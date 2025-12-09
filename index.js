@@ -1,7 +1,7 @@
 require("dotenv").config(); // Fixed: Must be the first line
 
 const express = require("express");
-const cors = require("cors");
+// const cors = require("cors");
 const sql = require("mssql");
 const bcrypt = require("bcrypt");
 const { Resend } = require("resend");
@@ -10,7 +10,7 @@ const crypto = require("node:crypto");
 const app = express();
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-app.use(cors());
+// app.use(cors());
 app.use(express.json());
 
 const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
