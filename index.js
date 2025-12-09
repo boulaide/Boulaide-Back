@@ -1,7 +1,6 @@
-require("dotenv").config(); // Fixed: Must be the first line
+require("dotenv").config();
 
 const express = require("express");
-// const cors = require("cors");
 const sql = require("mssql");
 const bcrypt = require("bcrypt");
 const { Resend } = require("resend");
@@ -10,10 +9,15 @@ const crypto = require("node:crypto");
 const app = express();
 const resend = new Resend(process.env.RESEND_API_KEY);
 
-// app.use(cors());
 app.use(express.json());
 
-const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:3000";
+const API_PUBLIC_URL =
+  process.env.API_PUBLIC_URL ||
+  "https://boulaide-appservice-gzgua4ghbuaucbcr.germanywestcentral-01.azurewebsites.net";
+
+const FRONTEND_URL_FALLBACK =
+  process.env.FRONTEND_URL || "https://play.visit-boulaide.com";
+
 const dbConfig = {
   user: "regio-admin",
   password: "regi0-adm1n!!",
@@ -54,7 +58,8 @@ async function getPool() {
   return globalPool;
 }
 
-async function createUser(username, email, password) {
+// Atualizado: recebe clientUrl para montar o link corretamente
+async function createUser(username, email, password, clientUrl) {
   try {
     const saltRounds = 10;
     const hashedPassword = await bcrypt.hash(password, saltRounds);
@@ -73,6 +78,9 @@ async function createUser(username, email, password) {
                 VALUES (@usernameParam, @emailParam, @passwordParam, 0, @tokenParam)
             `);
 
+    // Monta o link apontando para a API, mas enviando o redirect (frontend) junto
+    const verificationLink = `${API_PUBLIC_URL}/verify-email?token=${verificationToken}&redirect=${clientUrl}`;
+
     await resend.emails.send({
       from: "not-reply@visit-boulaide.com",
       to: email,
@@ -80,7 +88,7 @@ async function createUser(username, email, password) {
       html: `
         <p>Hello, ${username}!</p>
         <p>Thank you for registering. To activate your account, please click the link below:</p>
-        <a href="${FRONTEND_URL}/verify-email?token=${verificationToken}">Confirm Account</a>
+        <a href="${verificationLink}">Confirm Account</a>
         <p>If you did not create this account, please ignore this email.</p>
       `,
     });
@@ -145,7 +153,8 @@ async function verifyUserToken(token) {
   return true;
 }
 
-async function createPasswordResetToken(email) {
+// Atualizado: recebe clientUrl para o link de reset
+async function createPasswordResetToken(email, clientUrl) {
   const pool = await getPool();
 
   const userResult = await pool
@@ -175,7 +184,7 @@ async function createPasswordResetToken(email) {
     html: `
         <p>Hello, ${user.username}.</p>
         <p>You requested a password reset. Click the link below to create a new password:</p>
-        <a href="${FRONTEND_URL}/reset-password?token=${resetToken}">Reset Password</a>
+        <a href="${clientUrl}/reset-password?token=${resetToken}">Reset Password</a>
         <p>This link expires in 1 hour.</p>
       `,
   });
@@ -650,11 +659,15 @@ app.put("/inventory/equip", async (req, res) => {
 app.post("/register", async (req, res) => {
   try {
     const { username, email, password } = req.body;
+
+    // Detecta a origem, senão usa o FALLBACK
+    const origin = req.headers.origin || FRONTEND_URL_FALLBACK;
+
     if (!username || !email || !password) {
       return res.status(400).json({ error: "All fields are required" });
     }
 
-    const newUser = await createUser(username, email, password);
+    const newUser = await createUser(username, email, password, origin);
     const defaultCustomizations = [64, 65, 66];
     for (const customizationId of defaultCustomizations) {
       await addUserCustomization(newUser.user_id, customizationId, true);
@@ -721,10 +734,7 @@ app.put("/user/:id", async (req, res) => {
       return res.status(400).json({ error: "No data to update." });
     }
 
-    const updatedUser = await updateUser(
-      Number.Number.parseInt(id, 10),
-      updates
-    );
+    const updatedUser = await updateUser(Number.parseInt(id, 10), updates);
     res.json({
       success: true,
       message: "Profile updated successfully.",
@@ -746,7 +756,7 @@ app.delete("/user/:id", async (req, res) => {
       return res.status(400).json({ error: "User ID is required." });
     }
 
-    const success = await deleteUser(Number.Number.parseInt(id, 10));
+    const success = await deleteUser(Number.parseInt(id, 10));
 
     if (success) {
       res
@@ -964,29 +974,31 @@ app.put("/quests/:id", async (req, res) => {
 
 app.get("/verify-email", async (req, res) => {
   try {
-    const { token } = req.query;
+    const { token, redirect } = req.query;
 
-    if (!token) return res.status(400).send("<h1>Error: Token required</h1>");
+    const targetUrl = redirect || FRONTEND_URL_FALLBACK;
+
+    if (!token)
+      return res.redirect(
+        `${targetUrl}?emailVerified=error&message=TokenMissing`
+      );
 
     const success = await verifyUserToken(token);
 
     if (success) {
-      res.send(`
-        <html>
-          <head><title>Account Verified</title></head>
-          <body style="font-family: Arial; text-align: center; padding-top: 50px;">
-            <h1 style="color: green;">Success!</h1>
-            <p>Your account has been successfully verified.</p>
-            <p>You can now close this window and log in to the application.</p>
-          </body>
-        </html>
-      `);
+      return res.redirect(`${targetUrl}?emailVerified=success`);
     } else {
-      res.status(400).send("<h1>Error: Invalid or expired token.</h1>");
+      return res.redirect(
+        `${targetUrl}?emailVerified=error&message=InvalidToken`
+      );
     }
   } catch (err) {
     console.error(err);
-    res.status(500).send("<h1>Internal error verifying account.</h1>");
+    const { redirect } = req.query;
+    const targetUrl = redirect || FRONTEND_URL_FALLBACK;
+    return res.redirect(
+      `${targetUrl}?emailVerified=error&message=InternalError`
+    );
   }
 });
 
@@ -995,7 +1007,9 @@ app.post("/forgot-password", async (req, res) => {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: "Email is required" });
 
-    await createPasswordResetToken(email);
+    const origin = req.headers.origin || FRONTEND_URL_FALLBACK;
+
+    await createPasswordResetToken(email, origin);
 
     res.json({
       success: true,
