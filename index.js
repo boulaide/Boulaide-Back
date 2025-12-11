@@ -1044,7 +1044,7 @@ app.get("/", async (req, res) => {
   return res.json({ success: "api connected via Azure Functions" });
 });
 
-if (process.env.AZURE_FUNCTIONS_WORKER_RUNTIME) {
+if (process.env.FUNCTIONS_WORKER_RUNTIME) {
   console.log("Iniciando em modo Azure Functions...");
   const { app: azureApp } = require("@azure/functions");
   const { createHandler } = require("azure-function-express");
