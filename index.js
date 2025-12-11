@@ -1041,10 +1041,28 @@ app.post("/reset-password", async (req, res) => {
 });
 
 app.get("/", async (req, res) => {
-  return res.json({ success: "api connected" });
+  return res.json({ success: "api connected via Azure Functions" });
 });
 
-const port = process.env.PORT || 3001;
-app.listen(port, () => {
-  console.log(`\n\nServer is running on port ${port}`);
-});
+if (process.env.AZURE_FUNCTIONS_WORKER_RUNTIME) {
+  console.log("Iniciando em modo Azure Functions...");
+  const { app: azureApp } = require("@azure/functions");
+  const { createHandler } = require("azure-function-express");
+
+  const expressHandler = createHandler(app);
+
+  azureApp.http("api", {
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    authLevel: "anonymous",
+    route: "{*route}",
+    handler: (req, context) => {
+      return expressHandler(context, req);
+    },
+  });
+} else {
+  const port = process.env.PORT || 3001;
+  app.listen(port, () => {
+    console.log(`\n\n🚀 Servidor rodando LOCALMENTE na porta ${port}`);
+    console.log(`Link: http://localhost:${port}`);
+  });
+}
