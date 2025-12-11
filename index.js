@@ -1,13 +1,10 @@
 require("dotenv").config();
-const { app: azureApp } = require("@azure/functions");
-const { createHandler } = require("azure-function-express");
+
 const express = require("express");
 const sql = require("mssql");
 const bcrypt = require("bcrypt");
 const { Resend } = require("resend");
 const crypto = require("node:crypto");
-
-console.log(">>> INICIANDO O SERVIDOR... <<<");
 
 const app = express();
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -1044,40 +1041,10 @@ app.post("/reset-password", async (req, res) => {
 });
 
 app.get("/", async (req, res) => {
-  return res.json({ success: "api connected via Azure Functions" });
+  return res.json({ success: "api connected" });
 });
 
-try {
-  console.log(">>> TENTANDO REGISTRAR FUNCTION NO AZURE... <<<");
-
-  // Cria o handler do Express para a Function
-  const expressHandler = createHandler(app);
-
-  // Registra a função 'api'
-  azureApp.http("api", {
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    authLevel: "anonymous",
-    route: "{*route}",
-    handler: (req, context) => {
-      context.log("Request recebida na Azure Function: " + req.url);
-      return expressHandler(context, req);
-    },
-  });
-  console.log(">>> FUNCTION 'API' REGISTRADA! <<<");
-} catch (error) {
-  console.error(">>> ERRO AO REGISTRAR FUNCTION:", error);
-}
-
-// =================================================================
-// MODO LOCAL (APENAS SE NÃO TIVERMOS NO AZURE)
-// =================================================================
-// Se o runtime do Azure não estiver presente, rodamos o listen
-if (
-  !process.env.AZURE_FUNCTIONS_WORKER_RUNTIME &&
-  !process.env.FUNCTIONS_WORKER_RUNTIME
-) {
-  const port = process.env.PORT || 3001;
-  app.listen(port, () => {
-    console.log(`\n\n🚀 Servidor LOCAL rodando na porta ${port}`);
-  });
-}
+const port = process.env.PORT || 3001;
+app.listen(port, () => {
+  console.log(`\n\nServer is running on port ${port}`);
+});
