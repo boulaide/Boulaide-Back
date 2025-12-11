@@ -1044,10 +1044,16 @@ app.get("/", async (req, res) => {
   return res.json({ success: "api connected via Azure Functions" });
 });
 
+// =================================================================
+// CORREÇÃO: Usando a variável certa e bloco Try/Catch
+// =================================================================
+
+// A variável padrão do Azure é 'FUNCTIONS_WORKER_RUNTIME' (vale 'node')
+// Verificamos se ela existe
 const isAzure = process.env.FUNCTIONS_WORKER_RUNTIME === "node";
 
 if (isAzure) {
-  console.log("Environment: Azure Functions detectado.");
+  console.log("Environment: Azure Functions detectado. Tentando registrar...");
 
   try {
     const { app: azureApp } = require("@azure/functions");
@@ -1055,6 +1061,7 @@ if (isAzure) {
 
     const expressHandler = createHandler(app);
 
+    // Registra o gatilho HTTP chamado 'api'
     azureApp.http("api", {
       methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
       authLevel: "anonymous",
@@ -1063,9 +1070,13 @@ if (isAzure) {
         return expressHandler(context, req);
       },
     });
-    console.log("Azure Function 'api' registrada com sucesso.");
+    console.log("SUCESSO: Azure Function 'api' registrada!");
   } catch (error) {
-    console.error("ERRO FATAL: Falha ao carregar módulos do Azure.", error);
+    console.error(
+      "ERRO CRÍTICO: Não foi possível carregar os módulos do Azure.",
+      error
+    );
+    console.error("Verifique se 'npm install' rodou corretamente.");
   }
 } else {
   const port = process.env.PORT || 3001;
