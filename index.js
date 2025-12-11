@@ -1044,41 +1044,37 @@ app.get("/", async (req, res) => {
   return res.json({ success: "api connected via Azure Functions" });
 });
 
-// =================================================================
-// CORREÇÃO: Usando a variável certa e bloco Try/Catch
-// =================================================================
-
-// A variável padrão do Azure é 'FUNCTIONS_WORKER_RUNTIME' (vale 'node')
-// Verificamos se ela existe
 const isAzure = process.env.FUNCTIONS_WORKER_RUNTIME === "node";
 
 if (isAzure) {
-  console.log("Environment: Azure Functions detectado. Tentando registrar...");
+  console.log(
+    "Environment: Azure Functions detectado. Inicializando adaptador..."
+  );
 
   try {
     const { app: azureApp } = require("@azure/functions");
     const { createHandler } = require("azure-function-express");
 
+    // Cria o handler usando a biblioteca (muito mais seguro que fazer na mão)
     const expressHandler = createHandler(app);
 
-    // Registra o gatilho HTTP chamado 'api'
     azureApp.http("api", {
       methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
       authLevel: "anonymous",
-      route: "{*route}",
+      route: "{*route}", // Pega tudo que vier depois de /api/
       handler: (req, context) => {
+        // O adaptador espera (context, req), mas a V4 manda (req, context).
+        // Essa inversão é o "pulo do gato".
         return expressHandler(context, req);
       },
     });
+
     console.log("SUCESSO: Azure Function 'api' registrada!");
   } catch (error) {
-    console.error(
-      "ERRO CRÍTICO: Não foi possível carregar os módulos do Azure.",
-      error
-    );
-    console.error("Verifique se 'npm install' rodou corretamente.");
+    console.error("ERRO CRÍTICO no Azure:", error);
   }
 } else {
+  // 2. Se não for Azure, roda local
   const port = process.env.PORT || 3001;
   app.listen(port, () => {
     console.log(`\n\n🚀 Servidor rodando LOCALMENTE na porta ${port}`);
