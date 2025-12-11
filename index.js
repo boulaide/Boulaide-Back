@@ -1,10 +1,13 @@
 require("dotenv").config();
-
+const { app: azureApp } = require("@azure/functions");
+const { createHandler } = require("azure-function-express");
 const express = require("express");
 const sql = require("mssql");
 const bcrypt = require("bcrypt");
 const { Resend } = require("resend");
 const crypto = require("node:crypto");
+
+console.log(">>> INICIANDO O SERVIDOR... <<<");
 
 const app = express();
 const resend = new Resend(process.env.RESEND_API_KEY);
@@ -1044,40 +1047,37 @@ app.get("/", async (req, res) => {
   return res.json({ success: "api connected via Azure Functions" });
 });
 
-const isAzure = process.env.FUNCTIONS_WORKER_RUNTIME === "node";
+try {
+  console.log(">>> TENTANDO REGISTRAR FUNCTION NO AZURE... <<<");
 
-if (isAzure) {
-  console.log(
-    "Environment: Azure Functions detectado. Inicializando adaptador..."
-  );
+  // Cria o handler do Express para a Function
+  const expressHandler = createHandler(app);
 
-  try {
-    const { app: azureApp } = require("@azure/functions");
-    const { createHandler } = require("azure-function-express");
+  // Registra a função 'api'
+  azureApp.http("api", {
+    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    authLevel: "anonymous",
+    route: "{*route}",
+    handler: (req, context) => {
+      context.log("Request recebida na Azure Function: " + req.url);
+      return expressHandler(context, req);
+    },
+  });
+  console.log(">>> FUNCTION 'API' REGISTRADA! <<<");
+} catch (error) {
+  console.error(">>> ERRO AO REGISTRAR FUNCTION:", error);
+}
 
-    // Cria o handler usando a biblioteca (muito mais seguro que fazer na mão)
-    const expressHandler = createHandler(app);
-
-    azureApp.http("api", {
-      methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-      authLevel: "anonymous",
-      route: "{*route}", // Pega tudo que vier depois de /api/
-      handler: (req, context) => {
-        // O adaptador espera (context, req), mas a V4 manda (req, context).
-        // Essa inversão é o "pulo do gato".
-        return expressHandler(context, req);
-      },
-    });
-
-    console.log("SUCESSO: Azure Function 'api' registrada!");
-  } catch (error) {
-    console.error("ERRO CRÍTICO no Azure:", error);
-  }
-} else {
-  // 2. Se não for Azure, roda local
+// =================================================================
+// MODO LOCAL (APENAS SE NÃO TIVERMOS NO AZURE)
+// =================================================================
+// Se o runtime do Azure não estiver presente, rodamos o listen
+if (
+  !process.env.AZURE_FUNCTIONS_WORKER_RUNTIME &&
+  !process.env.FUNCTIONS_WORKER_RUNTIME
+) {
   const port = process.env.PORT || 3001;
   app.listen(port, () => {
-    console.log(`\n\n🚀 Servidor rodando LOCALMENTE na porta ${port}`);
-    console.log(`Link: http://localhost:${port}`);
+    console.log(`\n\n🚀 Servidor LOCAL rodando na porta ${port}`);
   });
 }
