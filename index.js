@@ -1044,21 +1044,29 @@ app.get("/", async (req, res) => {
   return res.json({ success: "api connected via Azure Functions" });
 });
 
-if (process.env.FUNCTIONS_WORKER_RUNTIME) {
-  console.log("Iniciando em modo Azure Functions...");
-  const { app: azureApp } = require("@azure/functions");
-  const { createHandler } = require("azure-function-express");
+const isAzure = process.env.FUNCTIONS_WORKER_RUNTIME === "node";
 
-  const expressHandler = createHandler(app);
+if (isAzure) {
+  console.log("Environment: Azure Functions detectado.");
 
-  azureApp.http("api", {
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    authLevel: "anonymous",
-    route: "{*route}",
-    handler: (req, context) => {
-      return expressHandler(context, req);
-    },
-  });
+  try {
+    const { app: azureApp } = require("@azure/functions");
+    const { createHandler } = require("azure-function-express");
+
+    const expressHandler = createHandler(app);
+
+    azureApp.http("api", {
+      methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+      authLevel: "anonymous",
+      route: "{*route}",
+      handler: (req, context) => {
+        return expressHandler(context, req);
+      },
+    });
+    console.log("Azure Function 'api' registrada com sucesso.");
+  } catch (error) {
+    console.error("ERRO FATAL: Falha ao carregar módulos do Azure.", error);
+  }
 } else {
   const port = process.env.PORT || 3001;
   app.listen(port, () => {
