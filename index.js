@@ -5,15 +5,27 @@ const sql = require("mssql");
 const bcrypt = require("bcrypt");
 const { Resend } = require("resend");
 const crypto = require("node:crypto");
+const cors = require("cors");
 
 const app = express();
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+app.use(
+  cors({
+    origin: [
+      "http://localhost:3000",
+      "https://play.visit-boulaide.com",
+      "https://play-test.visit-boulaide.com",
+    ],
+    methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true,
+  })
+);
+
 app.use(express.json());
 
 const API_PUBLIC_URL =
-  process.env.API_PUBLIC_URL ||
-  "https://boulaide-appservice-gzgua4ghbuaucbcr.germanywestcentral-01.azurewebsites.net";
+  process.env.API_PUBLIC_URL || "https://api.visit-boulaide.com";
 
 const FRONTEND_URL_FALLBACK =
   process.env.FRONTEND_URL || "https://play.visit-boulaide.com";
