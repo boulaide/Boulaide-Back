@@ -19,7 +19,7 @@ app.use(
     ],
     methods: ["GET", "POST", "PUT", "DELETE"],
     credentials: true,
-  })
+  }),
 );
 
 app.use(express.json());
@@ -31,10 +31,10 @@ const FRONTEND_URL_FALLBACK =
   process.env.FRONTEND_URL || "https://play.visit-boulaide.com";
 
 const dbConfig = {
-  user: "regio-admin",
-  password: "regi0-adm1n!!",
-  server: "boulaide.database.windows.net",
-  database: "boulaide",
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  server: process.env.DB_SERVER,
+  database: process.env.DB_NAME,
   options: {
     encrypt: true,
     trustServerCertificate: false,
@@ -149,7 +149,7 @@ async function verifyUserToken(token) {
     .request()
     .input("tokenParam", sql.VarChar(255), token)
     .query(
-      "SELECT user_id FROM dbo.users WHERE verification_token = @tokenParam"
+      "SELECT user_id FROM dbo.users WHERE verification_token = @tokenParam",
     );
 
   const user = result.recordset[0];
@@ -159,7 +159,7 @@ async function verifyUserToken(token) {
     .request()
     .input("userIdParam", sql.Int, user.user_id)
     .query(
-      "UPDATE dbo.users SET is_verified = 1, verification_token = NULL WHERE user_id = @userIdParam"
+      "UPDATE dbo.users SET is_verified = 1, verification_token = NULL WHERE user_id = @userIdParam",
     );
 
   return true;
@@ -186,7 +186,7 @@ async function createPasswordResetToken(email, clientUrl) {
     .input("tokenParam", sql.VarChar(255), resetToken)
     .input("expiresParam", sql.DateTime, expires)
     .query(
-      "UPDATE dbo.users SET reset_token = @tokenParam, reset_token_expires = @expiresParam WHERE user_id = @userIdParam"
+      "UPDATE dbo.users SET reset_token = @tokenParam, reset_token_expires = @expiresParam WHERE user_id = @userIdParam",
     );
 
   await resend.emails.send({
@@ -284,7 +284,7 @@ async function updateUser(userId, updates) {
   }
 
   const query = `UPDATE dbo.users SET ${setClauses.join(
-    ", "
+    ", ",
   )} WHERE user_id = @userIdParam`;
   await request.query(query);
 
@@ -292,7 +292,7 @@ async function updateUser(userId, updates) {
     .request()
     .input("userIdParam", sql.Int, userId)
     .query(
-      "SELECT user_id, username, email FROM dbo.users WHERE user_id = @userIdParam"
+      "SELECT user_id, username, email FROM dbo.users WHERE user_id = @userIdParam",
     );
 
   return updatedUser.recordset[0];
@@ -308,17 +308,17 @@ async function deleteUser(userId) {
     request.input("userIdParam", sql.Int, userId);
 
     await request.query(
-      "DELETE FROM dbo.user_customizations WHERE user_id = @userIdParam"
+      "DELETE FROM dbo.user_customizations WHERE user_id = @userIdParam",
     );
     await request.query(
-      "DELETE FROM dbo.user_stars WHERE user_id = @userIdParam"
+      "DELETE FROM dbo.user_stars WHERE user_id = @userIdParam",
     );
     await request.query(
-      "DELETE FROM dbo.user_quests WHERE user_id = @userIdParam"
+      "DELETE FROM dbo.user_quests WHERE user_id = @userIdParam",
     );
 
     const result = await request.query(
-      "DELETE FROM dbo.users WHERE user_id = @userIdParam"
+      "DELETE FROM dbo.users WHERE user_id = @userIdParam",
     );
 
     await transaction.commit();
@@ -350,7 +350,7 @@ async function getCustomization(user_id) {
 async function addUserCustomization(
   user_id,
   customization_id,
-  isEquipped = false
+  isEquipped = false,
 ) {
   try {
     const pool = await getPool();
@@ -382,7 +382,7 @@ async function addUserCustomizationSet(user_id, customization_ids) {
     }
 
     const results = await Promise.all(
-      customization_ids.map((id) => addUserCustomization(user_id, id, false))
+      customization_ids.map((id) => addUserCustomization(user_id, id, false)),
     );
 
     return results.some(Boolean);
@@ -505,7 +505,7 @@ async function assignQuestsToUser(user_id) {
     const queryValues = quests.recordset
       .map(
         (_, index) =>
-          `(@userIdParam, @questIdParam${index}, 0, @descParam${index}, @logTextParam${index})`
+          `(@userIdParam, @questIdParam${index}, 0, @descParam${index}, @logTextParam${index})`,
       )
       .join(", ");
 
@@ -517,12 +517,12 @@ async function assignQuestsToUser(user_id) {
       request.input(
         `descParam${index}`,
         sql.VarChar(sql.MAX),
-        quest.description
+        quest.description,
       );
       request.input(
         `logTextParam${index}`,
         sql.VarChar(sql.MAX),
-        quest.log_text
+        quest.log_text,
       );
     });
 
@@ -542,7 +542,7 @@ async function updateUserQuestDetails(
   user_id,
   quest_id,
   newDescription,
-  newLogText
+  newLogText,
 ) {
   try {
     const pool = await getPool();
@@ -638,7 +638,7 @@ app.put("/inventory/equip", async (req, res) => {
         .request()
         .input("userIdParam", sql.Int, user_id)
         .query(
-          "UPDATE dbo.user_customizations SET equipped = 0 WHERE user_id = @userIdParam"
+          "UPDATE dbo.user_customizations SET equipped = 0 WHERE user_id = @userIdParam",
         );
 
       if (equipped_ids.length > 0) {
@@ -648,7 +648,7 @@ app.put("/inventory/equip", async (req, res) => {
           .request()
           .input("userIdParam", sql.Int, user_id)
           .query(
-            `UPDATE dbo.user_customizations SET equipped = 1 WHERE user_id = @userIdParam AND customization_id IN (${idList})`
+            `UPDATE dbo.user_customizations SET equipped = 1 WHERE user_id = @userIdParam AND customization_id IN (${idList})`,
           );
       }
 
@@ -850,7 +850,7 @@ app.post("/add-user-star", async (req, res) => {
       });
     else {
       console.log(
-        `Attempt to add existing star or insert failure: user_id=${userIdNum}, quest_id=${questIdNum}`
+        `Attempt to add existing star or insert failure: user_id=${userIdNum}, quest_id=${questIdNum}`,
       );
       return res.status(304).json({
         success: false,
@@ -907,7 +907,7 @@ app.put("/user-quests/:user_id/:quest_id", async (req, res) => {
       userId,
       questId,
       description,
-      log_text
+      log_text,
     );
     let successStatus = true;
 
@@ -965,7 +965,7 @@ app.put("/quests/:id", async (req, res) => {
     const success = await updateUserQuestDetails(
       questId,
       description,
-      log_text
+      log_text,
     );
 
     if (success) {
@@ -992,7 +992,7 @@ app.get("/verify-email", async (req, res) => {
 
     if (!token)
       return res.redirect(
-        `${targetUrl}?emailVerified=error&message=TokenMissing`
+        `${targetUrl}?emailVerified=error&message=TokenMissing`,
       );
 
     const success = await verifyUserToken(token);
@@ -1001,7 +1001,7 @@ app.get("/verify-email", async (req, res) => {
       return res.redirect(`${targetUrl}?emailVerified=success`);
     } else {
       return res.redirect(
-        `${targetUrl}?emailVerified=error&message=InvalidToken`
+        `${targetUrl}?emailVerified=error&message=InvalidToken`,
       );
     }
   } catch (err) {
@@ -1009,7 +1009,7 @@ app.get("/verify-email", async (req, res) => {
     const { redirect } = req.query;
     const targetUrl = redirect || FRONTEND_URL_FALLBACK;
     return res.redirect(
-      `${targetUrl}?emailVerified=error&message=InternalError`
+      `${targetUrl}?emailVerified=error&message=InternalError`,
     );
   }
 });
